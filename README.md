@@ -6,7 +6,7 @@ Spotcast provides a keyboard-driven interface for launching applications, openin
 
 ## Features
 
-### 🔎 Spotlight-style launcher
+### Spotlight-style launcher
 
 - `Alt + Space` opens Spotcast.
 - Search field is focused automatically.
@@ -19,7 +19,7 @@ Spotcast provides a keyboard-driven interface for launching applications, openin
 - Automatically expands when results are available.
 - Hidden from the Windows taskbar.
 
-### 📂 Fast persistent search index
+### Fast persistent search index
 
 Spotcast uses a persistent SQLite FTS5 search index instead of recursively scanning the filesystem for every search.
 
@@ -40,7 +40,7 @@ discord
 
 does not cause Spotcast to scan the entire drive again.
 
-### 🖥️ Application launcher
+### Application launcher
 
 Spotcast can discover Windows applications through Start Menu entries and launch them directly.
 
@@ -59,7 +59,7 @@ Application
 
 Press `Enter` to launch it.
 
-### 🧑‍💻 Automatic development-environment detection
+### Automatic development-environment detection
 
 Spotcast detects common development projects and automatically chooses an appropriate IDE.
 
@@ -74,7 +74,7 @@ Spotcast detects common development projects and automatically chooses an approp
 
 For example, selecting a Gradle project can open the entire project directly in IntelliJ IDEA instead of opening File Explorer.
 
-### 📁 Files and folders
+### Files and folders
 
 The search index includes files and folders from locations such as:
 
@@ -108,7 +108,7 @@ build
 
 Hidden dot-prefixed files and directories are also excluded.
 
-### 💻 Command launcher
+### Command launcher
 
 Prefix a command with `>`.
 
@@ -128,7 +128,7 @@ Examples:
 
 Commands are launched in a real Windows `cmd.exe` window.
 
-### 🧮 Calculator
+### Calculator
 
 Prefix mathematical expressions with `=`.
 
@@ -144,7 +144,7 @@ Examples:
 
 Calculation results can be copied by pressing `Enter`.
 
-### 📏 Unit conversion
+### Unit conversion
 
 Spotcast supports common unit conversions, including:
 
@@ -170,7 +170,7 @@ Examples:
 2 rem
 ```
 
-### 🔖 Bookmarks
+### Bookmarks
 
 Type `@` to access bookmarks.
 
@@ -220,7 +220,7 @@ Opens the bookmark file.
 ]
 ```
 
-### 🌐 Google fallback
+### Google fallback
 
 When a normal search has no local result, Spotcast provides a Google search result.
 
@@ -240,7 +240,7 @@ Pressing `Enter` opens the search in the default browser.
 
 During initial indexing, Spotcast displays an indexing status instead of treating the incomplete index as an empty search.
 
-### 🪟 System tray
+### System tray
 
 Spotcast can remain running in the Windows system tray.
 
@@ -321,8 +321,6 @@ bun tauri dev
 ```
 
 ### Rust checks
-
-The Rust project is inside `src-tauri`:
 
 ```powershell
 cd src-tauri
