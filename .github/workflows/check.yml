@@ -1,0 +1,27 @@
+name: 'Quality Checks'
+
+on:
+    push:
+        branches: ['main']
+    pull_request:
+        branches: ['main']
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Setup Bun
+              uses: oven-sh/setup-bun@v1
+
+            - name: Install Rust
+              uses: dtolnay/rust-toolchain@stable
+
+            - name: Run Bun Check
+              run: |
+                  bun install
+                  bun run check # Ensure this script exists in your package.json
+
+            - name: Run Cargo Check
+              run: cargo check
