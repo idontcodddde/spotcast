@@ -3,7 +3,7 @@ name: 'Publish Release'
 on:
     push:
         tags:
-            - 'v*' # Triggers on git tags like v1.0.0, v0.1.2, etc.
+            - 'v*' # should trigger on git tags like v1.0.0, v0.1.2, etc.
 
 jobs:
     publish-tauri:
