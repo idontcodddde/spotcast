@@ -11,63 +11,91 @@
     action_payload: string;
   }
 
-  let query = $state("");
-  let results = $state<SearchResult[]>([]);
-  let selectedIndex = $state(0);
-  let inputElement = $state<HTMLInputElement | null>(null);
-
-  let searchTimeout: ReturnType<typeof setTimeout> | undefined;
-
+  const PAGE_SIZE = 20;
   const COLLAPSED_HEIGHT = 76;
   const EXPANDED_HEIGHT = 430;
 
   const currentWindow = getCurrentWindow();
 
-  onMount(() => {
-    inputElement?.focus();
-    resizeLauncher(false);
+  let query = $state("");
+  let results = $state<SearchResult[]>([]);
+  let selectedIndex = $state(0);
+  let inputElement = $state<HTMLInputElement | null>(null);
+  let loadingMore = $state(false);
+  let hasMore = $state(true);
+  let currentOffset = $state(0);
 
-    return () => {
-      if (searchTimeout) {
-        clearTimeout(searchTimeout);
-      }
-    };
-  });
+  let searchTimeout: ReturnType<typeof setTimeout> | undefined;
+  let searchGeneration = 0;
+  let launcherExpanded = false;
 
-  async function closeLauncher() {
-    query = "";
-    results = [];
-    selectedIndex = 0;
+  function invalidateSearch() {
+    searchGeneration++;
 
     if (searchTimeout) {
       clearTimeout(searchTimeout);
+      searchTimeout = undefined;
     }
 
-    resizeLauncher(false);
+    loadingMore = false;
+  }
 
+  async function resizeLauncher(height: number) {
     try {
-      await currentWindow.hide();
+      await invoke("set_launcher_height", {
+        height,
+      });
     } catch (error) {
-      console.error("Failed to hide launcher:", error);
+      console.error("Failed to resize launcher:", error);
     }
   }
 
-  function resizeLauncher(expanded: boolean) {
-    invoke("set_launcher_height", {
-      height: expanded ? EXPANDED_HEIGHT : COLLAPSED_HEIGHT,
-    }).catch(console.error);
+  function expandLauncher() {
+    if (launcherExpanded) {
+      return;
+    }
+
+    launcherExpanded = true;
+    void resizeLauncher(EXPANDED_HEIGHT);
+  }
+
+  function collapseLauncher() {
+    if (!launcherExpanded) {
+      return;
+    }
+
+    launcherExpanded = false;
+    void resizeLauncher(COLLAPSED_HEIGHT);
+  }
+
+  function clearLocalState() {
+    invalidateSearch();
+
+    query = "";
+    results = [];
+    selectedIndex = 0;
+    currentOffset = 0;
+    hasMore = true;
+  }
+
+  async function closeLauncher() {
+    clearLocalState();
+    collapseLauncher();
+
+    try {
+      await invoke("hide_launcher");
+    } catch {
+      try {
+        await currentWindow.hide();
+      } catch (error) {
+        console.error("Failed to hide launcher:", error);
+      }
+    }
   }
 
   function clearSearch() {
-    query = "";
-    results = [];
-    selectedIndex = 0;
-
-    if (searchTimeout) {
-      clearTimeout(searchTimeout);
-    }
-
-    resizeLauncher(false);
+    clearLocalState();
+    collapseLauncher();
 
     requestAnimationFrame(() => {
       inputElement?.focus();
@@ -87,7 +115,6 @@
       let target = parts[1];
 
       target = target.replace(/^https?:\/\//i, "");
-
       target = target.split("/")[0];
 
       return `ping ${target}`;
@@ -128,7 +155,6 @@
     }
 
     const title = payload.slice(0, separator).trim();
-
     const url = payload.slice(separator + 1).trim();
 
     if (!title || !url) {
@@ -182,7 +208,6 @@
 
         case "bookmark_edit":
           await invoke("open_bookmarks_file");
-
           await closeLauncher();
           return;
 
@@ -208,23 +233,138 @@
     }
   }
 
-  async function search(queryValue: string) {
+  async function search(value: string, generation: number) {
+    const trimmed = value.trim();
+
+    if (!trimmed) {
+      return;
+    }
+
     try {
-      const res = await invoke<SearchResult[]>("global_search", {
-        query: queryValue,
+      const response = await invoke<SearchResult[]>("global_search", {
+        query: trimmed,
+        offset: 0,
       });
 
-      results = res;
-      selectedIndex = 0;
+      if (generation !== searchGeneration) {
+        return;
+      }
 
-      resizeLauncher(res.length > 0);
+      if (query.trim() !== trimmed) {
+        return;
+      }
+
+      results = response;
+      selectedIndex = 0;
+      currentOffset = response.length;
+      hasMore = response.length >= PAGE_SIZE;
+
+      if (response.length > 0) {
+        expandLauncher();
+      } else {
+        collapseLauncher();
+      }
     } catch (error) {
+      if (generation !== searchGeneration) {
+        return;
+      }
+
       console.error("Search failed:", error);
 
-      results = [];
-      selectedIndex = 0;
+      results = [
+        {
+          id: "search-error",
+          title: "Search failed",
+          subtitle: String(error),
+          category: "status",
+          action_payload: "",
+        },
+      ];
 
-      resizeLauncher(false);
+      selectedIndex = 0;
+      currentOffset = 0;
+      hasMore = false;
+
+      expandLauncher();
+    }
+  }
+
+  function scheduleSearch(value: string) {
+    if (searchTimeout) {
+      clearTimeout(searchTimeout);
+      searchTimeout = undefined;
+    }
+
+    const generation = ++searchGeneration;
+
+    searchTimeout = setTimeout(() => {
+      searchTimeout = undefined;
+      void search(value, generation);
+    }, 100);
+  }
+
+  async function loadMore() {
+    const trimmed = query.trim();
+
+    if (
+      !trimmed ||
+      loadingMore ||
+      !hasMore ||
+      trimmed.startsWith(">") ||
+      trimmed.startsWith("@")
+    ) {
+      return;
+    }
+
+    const generation = searchGeneration;
+    const offset = currentOffset;
+
+    loadingMore = true;
+
+    try {
+      const response = await invoke<SearchResult[]>("global_search", {
+        query: trimmed,
+        offset,
+      });
+
+      if (generation !== searchGeneration) {
+        return;
+      }
+
+      if (query.trim() !== trimmed) {
+        return;
+      }
+
+      if (response.length === 0) {
+        hasMore = false;
+        return;
+      }
+
+      const existingIds = new Set(results.map((item) => item.id));
+
+      const newResults = response.filter((item) => !existingIds.has(item.id));
+
+      results = [...results, ...newResults];
+
+      currentOffset = results.length;
+      hasMore = response.length >= PAGE_SIZE;
+    } catch (error) {
+      console.error("Failed to load more results:", error);
+    } finally {
+      if (generation === searchGeneration) {
+        loadingMore = false;
+      }
+    }
+  }
+
+  function handleResultsScroll(event: Event) {
+    const element = event.currentTarget as HTMLDivElement;
+
+    const remaining =
+      element.scrollHeight - element.scrollTop - element.clientHeight;
+
+    if (remaining < 100) {
+      void loadMore();
     }
   }
 
@@ -236,90 +376,60 @@
       searchTimeout = undefined;
     }
 
+    ++searchGeneration;
+
     if (!currentQuery) {
       results = [];
       selectedIndex = 0;
+      currentOffset = 0;
+      hasMore = true;
+      loadingMore = false;
 
-      resizeLauncher(false);
+      collapseLauncher();
       return;
     }
 
     if (currentQuery.startsWith(">")) {
       results = [];
       selectedIndex = 0;
+      currentOffset = 0;
+      hasMore = false;
+      loadingMore = false;
 
-      resizeLauncher(currentQuery.length > 1);
-
+      expandLauncher();
       return;
     }
 
-    if (currentQuery.startsWith("@")) {
-      let active = true;
-
-      searchTimeout = setTimeout(async () => {
-        if (!active) {
-          return;
-        }
-
-        await search(currentQuery);
-      }, 50);
-
-      return () => {
-        active = false;
-
-        if (searchTimeout) {
-          clearTimeout(searchTimeout);
-          searchTimeout = undefined;
-        }
-      };
-    }
-
-    let active = true;
-
-    searchTimeout = setTimeout(async () => {
-      if (!active) {
-        return;
-      }
-
-      await search(currentQuery);
-    }, 100);
-
-    return () => {
-      active = false;
-
-      if (searchTimeout) {
-        clearTimeout(searchTimeout);
-        searchTimeout = undefined;
-      }
-    };
+    scheduleSearch(currentQuery);
   });
 
-  async function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.preventDefault();
+  async function handleKeyDown(event: KeyboardEvent) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
 
       await closeLauncher();
       return;
     }
 
-    if (e.key === "ArrowDown" && results.length > 0) {
-      e.preventDefault();
+    if (event.key === "ArrowDown" && results.length > 0) {
+      event.preventDefault();
 
       selectedIndex = (selectedIndex + 1) % results.length;
 
       return;
     }
 
-    if (e.key === "ArrowUp" && results.length > 0) {
-      e.preventDefault();
+    if (event.key === "ArrowUp" && results.length > 0) {
+      event.preventDefault();
 
       selectedIndex = (selectedIndex - 1 + results.length) % results.length;
 
       return;
     }
 
-    if (e.key === "Enter") {
-      e.preventDefault();
+    if (event.key === "Enter") {
+      event.preventDefault();
 
       if (query.trimStart().startsWith(">")) {
         await runCurrentCommand();
@@ -331,8 +441,6 @@
       if (selected) {
         await executeResult(selected);
       }
-
-      return;
     }
   }
 
@@ -340,39 +448,73 @@
     switch (category) {
       case "project":
         return "folder";
-
       case "file":
         return "file";
-
       case "app":
         return "app";
-
       case "conversion":
         return "arrow";
-
       case "command":
         return "command";
-
       case "bookmark":
         return "bookmark";
-
       case "bookmark_edit":
         return "edit";
-
       case "web":
         return "web";
-
       case "status":
         return "status";
-
       default:
         return "search";
     }
   }
+
+  onMount(() => {
+    requestAnimationFrame(() => {
+      inputElement?.focus();
+    });
+
+    void resizeLauncher(COLLAPSED_HEIGHT);
+
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        void closeLauncher();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown, true);
+
+    let unlistenFocus: (() => void) | undefined;
+
+    void currentWindow
+      .onFocusChanged(({ payload }) => {
+        if (!payload) {
+          clearLocalState();
+          collapseLauncher();
+        } else {
+          requestAnimationFrame(() => {
+            inputElement?.focus();
+          });
+        }
+      })
+      .then((unlisten) => {
+        unlistenFocus = unlisten;
+      });
+
+    return () => {
+      window.removeEventListener("keydown", handleGlobalKeyDown, true);
+
+      unlistenFocus?.();
+
+      invalidateSearch();
+    };
+  });
 </script>
 
 <svelte:head>
-  <title>Spotcast</title>
+  <title>spotcast</title>
 </svelte:head>
 
 <main class="spotlight-container">
@@ -388,21 +530,20 @@
         fill="none"
         aria-hidden="true"
       >
-        <circle cx="11" cy="11" r="7.5"></circle>
-
-        <line x1="16.5" y1="16.5" x2="21" y2="21"></line>
+        <circle cx="11" cy="11" r="7.5" />
+        <line x1="16.5" y1="16.5" x2="21" y2="21" />
       </svg>
     </div>
 
     <input
       bind:this={inputElement}
-      type="text"
       bind:value={query}
       onkeydown={handleKeyDown}
+      type="text"
       placeholder="Search"
       spellcheck="false"
       autocomplete="off"
-      aria-label="Spotlight search"
+      aria-label="Search"
     />
 
     {#if query}
@@ -420,9 +561,8 @@
           stroke="currentColor"
           stroke-width="2"
         >
-          <line x1="5" y1="5" x2="15" y2="15"></line>
-
-          <line x1="15" y1="5" x2="5" y2="15"></line>
+          <line x1="5" y1="5" x2="15" y2="15" />
+          <line x1="15" y1="5" x2="5" y2="15" />
         </svg>
       </button>
     {/if}
@@ -435,9 +575,6 @@
       class="result-item command-item active"
       type="button"
       onclick={runCurrentCommand}
-      onmouseenter={() => {
-        selectedIndex = 0;
-      }}
     >
       <div class="result-icon">
         <svg
@@ -448,9 +585,8 @@
           stroke="currentColor"
           stroke-width="1.8"
         >
-          <polyline points="7 8 11 12 7 16"></polyline>
-
-          <line x1="13" y1="16" x2="18" y2="16"></line>
+          <polyline points="7 8 11 12 7 16" />
+          <line x1="13" y1="16" x2="18" y2="16" />
         </svg>
       </div>
 
@@ -462,12 +598,12 @@
         <span class="subtitle"> Press Enter to run command </span>
       </div>
 
-      <span class="category command"> Command </span>
+      <span class="category"> Command </span>
     </button>
   {:else if results.length > 0}
     <div class="results-divider"></div>
 
-    <div class="results-list">
+    <div class="results-list" onscroll={handleResultsScroll}>
       {#each results as item, idx (item.id)}
         <button
           class:active={idx === selectedIndex}
@@ -476,7 +612,7 @@
           type="button"
           onclick={() => {
             selectedIndex = idx;
-            executeResult(item);
+            void executeResult(item);
           }}
           onmouseenter={() => {
             if (item.category !== "status") {
@@ -508,7 +644,6 @@
                 stroke-width="1.8"
               >
                 <path d="M6 3.5h8l4 4V20H6V3.5Z" />
-
                 <path d="M14 3.5V8h4" />
               </svg>
             {:else if getCategoryIcon(item.category) === "app"}
@@ -521,10 +656,9 @@
                 stroke-width="1.8"
               >
                 <rect x="4" y="4" width="16" height="16" rx="4" />
-
-                <path d="M8 8h8"></path>
-                <path d="M8 12h8"></path>
-                <path d="M8 16h5"></path>
+                <path d="M8 8h8" />
+                <path d="M8 12h8" />
+                <path d="M8 16h5" />
               </svg>
             {:else if getCategoryIcon(item.category) === "arrow"}
               <svg
@@ -535,10 +669,10 @@
                 stroke="currentColor"
                 stroke-width="1.8"
               >
-                <path d="M5 8h14"></path>
-                <path d="m15 4 4 4-4 4"></path>
-                <path d="M19 16H5"></path>
-                <path d="m9 12-4 4 4 4"></path>
+                <path d="M5 8h14" />
+                <path d="m15 4 4 4-4 4" />
+                <path d="M19 16H5" />
+                <path d="m9 12-4 4 4 4" />
               </svg>
             {:else if getCategoryIcon(item.category) === "command"}
               <svg
@@ -549,9 +683,8 @@
                 stroke="currentColor"
                 stroke-width="1.8"
               >
-                <polyline points="7 8 11 12 7 16"></polyline>
-
-                <line x1="13" y1="16" x2="18" y2="16"></line>
+                <polyline points="7 8 11 12 7 16" />
+                <line x1="13" y1="16" x2="18" y2="16" />
               </svg>
             {:else if getCategoryIcon(item.category) === "bookmark"}
               <svg
@@ -575,8 +708,7 @@
                 stroke="currentColor"
                 stroke-width="1.8"
               >
-                <path d="m14 5 5 5"></path>
-
+                <path d="m14 5 5 5" />
                 <path d="M4 20h5l10-10a3.54 3.54 0 0 0-5-5L4 15v5Z" />
               </svg>
             {:else if getCategoryIcon(item.category) === "web"}
@@ -589,11 +721,8 @@
                 stroke-width="1.8"
               >
                 <circle cx="12" cy="12" r="9" />
-
-                <path d="M3 12h18"></path>
-
+                <path d="M3 12h18" />
                 <path d="M12 3a14 14 0 0 1 0 18" />
-
                 <path d="M12 3a14 14 0 0 0 0 18" />
               </svg>
             {:else if getCategoryIcon(item.category) === "status"}
@@ -606,7 +735,6 @@
                 stroke-width="1.8"
               >
                 <circle cx="12" cy="12" r="8" />
-
                 <path d="M12 8v4l2.5 2.5" />
               </svg>
             {:else}
@@ -619,7 +747,6 @@
                 stroke-width="1.8"
               >
                 <circle cx="11" cy="11" r="7" />
-
                 <line x1="16.5" y1="16.5" x2="21" y2="21" />
               </svg>
             {/if}
@@ -644,21 +771,27 @@
           {/if}
         </button>
       {/each}
+
+      {#if loadingMore}
+        <div class="loading-more">Loading more...</div>
+      {/if}
     </div>
   {/if}
 </main>
 
 <style lang="scss">
-  :global(html) {
-    background: transparent;
-  }
-
-  :global(body) {
+  :global(html),
+  :global(body),
+  :global(#app) {
+    width: 100%;
+    height: 100%;
     margin: 0;
     padding: 0;
     overflow: hidden;
     background: transparent !important;
+  }
 
+  :global(body) {
     font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display",
       "SF Pro Text", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
 
@@ -672,9 +805,8 @@
 
   .spotlight-container {
     position: relative;
-
-    width: 100vw;
-    height: 100vh;
+    width: 100%;
+    height: 100%;
 
     display: flex;
     flex-direction: column;
@@ -683,7 +815,7 @@
 
     border-radius: 30px;
 
-    background: rgba(35, 35, 40, 0.46);
+    background: rgba(35, 35, 40, 0.82);
 
     backdrop-filter: blur(42px) saturate(175%) brightness(1.08);
 
@@ -700,49 +832,6 @@
     color: rgba(255, 255, 255, 0.96);
 
     isolation: isolate;
-  }
-
-  .spotlight-container::before {
-    content: "";
-
-    position: absolute;
-    inset: 0;
-
-    pointer-events: none;
-
-    border-radius: inherit;
-
-    background: radial-gradient(
-        circle 240px at 15% 0%,
-        rgba(255, 255, 255, 0.08),
-        transparent 70%
-      ),
-      radial-gradient(
-        circle 300px at 90% 100%,
-        rgba(120, 150, 255, 0.035),
-        transparent 72%
-      );
-
-    opacity: 0.85;
-
-    z-index: -1;
-  }
-
-  .spotlight-container::after {
-    content: "";
-
-    position: absolute;
-    inset: 0;
-
-    pointer-events: none;
-
-    border-radius: inherit;
-
-    box-shadow:
-      inset 0 0 0 1px rgba(255, 255, 255, 0.035),
-      inset 0 1px 2px rgba(255, 255, 255, 0.045);
-
-    z-index: 5;
   }
 
   .search-section,
@@ -805,8 +894,6 @@
 
     letter-spacing: -0.02em;
 
-    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-
     &::placeholder {
       color: rgba(255, 255, 255, 0.42);
     }
@@ -834,27 +921,13 @@
 
     background: rgba(255, 255, 255, 0.08);
 
-    backdrop-filter: blur(12px);
-
-    -webkit-backdrop-filter: blur(12px);
-
     color: rgba(255, 255, 255, 0.65);
 
     cursor: pointer;
+  }
 
-    transition:
-      background 120ms ease,
-      border-color 120ms ease;
-
-    &:hover {
-      background: rgba(255, 255, 255, 0.15);
-
-      border-color: rgba(255, 255, 255, 0.13);
-    }
-
-    &:active {
-      background: rgba(255, 255, 255, 0.19);
-    }
+  .clear-button:hover {
+    background: rgba(255, 255, 255, 0.15);
   }
 
   .results-divider {
@@ -878,24 +951,24 @@
     overflow-y: auto;
 
     overscroll-behavior: contain;
+  }
 
-    &::-webkit-scrollbar {
-      width: 5px;
-    }
+  .results-list::-webkit-scrollbar {
+    width: 5px;
+  }
 
-    &::-webkit-scrollbar-track {
-      background: transparent;
-    }
+  .results-list::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-    &::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.11);
+  .results-list::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.11);
 
-      border-radius: 10px;
-    }
+    border-radius: 10px;
+  }
 
-    &::-webkit-scrollbar-thumb:hover {
-      background: rgba(255, 255, 255, 0.17);
-    }
+  .results-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.17);
   }
 
   .result-item {
@@ -931,65 +1004,33 @@
 
     transition:
       background 120ms ease,
-      border-color 120ms ease,
-      box-shadow 120ms ease;
+      border-color 120ms ease;
+  }
 
-    &:hover {
-      background: rgba(255, 255, 255, 0.095);
+  .result-item:hover {
+    background: rgba(255, 255, 255, 0.095);
 
-      border-color: rgba(255, 255, 255, 0.085);
+    border-color: rgba(255, 255, 255, 0.085);
+  }
 
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.055),
-        0 3px 12px rgba(0, 0, 0, 0.06);
-    }
+  .result-item.active {
+    background: rgba(100, 145, 245, 0.26);
 
-    &.active {
-      background: rgba(100, 145, 245, 0.26);
+    border-color: rgba(165, 195, 255, 0.17);
+  }
 
-      border-color: rgba(165, 195, 255, 0.17);
+  .result-item.active .result-icon {
+    background: rgba(255, 255, 255, 0.12);
 
-      box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.11),
-        inset 0 0 18px rgba(255, 255, 255, 0.018),
-        0 3px 12px rgba(0, 0, 0, 0.08);
+    color: white;
+  }
 
-      .result-icon {
-        background: rgba(255, 255, 255, 0.12);
+  .result-item.active .title {
+    color: white;
+  }
 
-        border-color: rgba(255, 255, 255, 0.09);
-
-        color: white;
-      }
-
-      .title {
-        color: white;
-      }
-
-      .subtitle {
-        color: rgba(255, 255, 255, 0.72);
-      }
-
-      .category {
-        background: rgba(0, 0, 0, 0.08);
-
-        border-color: rgba(255, 255, 255, 0.07);
-
-        color: rgba(255, 255, 255, 0.78);
-      }
-    }
-
-    &.status-item {
-      cursor: default;
-
-      &:hover {
-        background: rgba(255, 255, 255, 0.025);
-
-        border-color: rgba(255, 255, 255, 0.035);
-
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
-      }
-    }
+  .result-item.active .subtitle {
+    color: rgba(255, 255, 255, 0.72);
   }
 
   .result-icon {
@@ -1008,18 +1049,7 @@
 
     background: rgba(255, 255, 255, 0.05);
 
-    backdrop-filter: blur(10px);
-
-    -webkit-backdrop-filter: blur(10px);
-
     color: rgba(255, 255, 255, 0.66);
-
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
-
-    transition:
-      background 120ms ease,
-      border-color 120ms ease,
-      color 120ms ease;
   }
 
   .text-group {
@@ -1043,8 +1073,6 @@
 
     font-weight: 500;
 
-    letter-spacing: -0.008em;
-
     white-space: nowrap;
     text-overflow: ellipsis;
   }
@@ -1056,8 +1084,6 @@
 
     font-size: 12px;
     line-height: 16px;
-
-    font-weight: 400;
 
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -1074,16 +1100,9 @@
 
     background: rgba(255, 255, 255, 0.04);
 
-    backdrop-filter: blur(8px);
-
-    -webkit-backdrop-filter: blur(8px);
-
     color: rgba(255, 255, 255, 0.35);
 
     font-size: 9px;
-    font-weight: 500;
-
-    letter-spacing: 0.035em;
 
     text-transform: uppercase;
   }
@@ -1094,21 +1113,13 @@
     width: calc(100% - 16px);
   }
 
-  @media (max-width: 500px) {
-    .spotlight-container {
-      border-radius: 24px;
-    }
+  .loading-more {
+    padding: 8px;
 
-    .search-section {
-      padding: 0 16px;
-    }
+    text-align: center;
 
-    input {
-      font-size: 22px;
-    }
+    color: rgba(255, 255, 255, 0.35);
 
-    .results-list {
-      padding: 7px;
-    }
+    font-size: 11px;
   }
 </style>

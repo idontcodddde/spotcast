@@ -337,7 +337,12 @@ pub fn start_search_indexer(state: SearchIndexState, app: AppHandle) {
     let _ = app;
 }
 
-pub fn search_index(state: &SearchIndexState, query: &str) -> Vec<SearchResultItem> {
+pub fn search_index(
+    state: &SearchIndexState,
+    query: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<SearchResultItem> {
     if !state.is_ready() {
         return vec![SearchResultItem {
             id: "indexing".into(),
@@ -356,12 +361,17 @@ pub fn search_index(state: &SearchIndexState, query: &str) -> Vec<SearchResultIt
         }];
     }
 
+    if limit == 0 {
+        return Vec::new();
+    }
+
     let Some(db_path) = state.get_db_path() else {
         return Vec::new();
     };
 
     let connection = match Connection::open(db_path) {
         Ok(connection) => connection,
+
         Err(error) => {
             eprintln!("Spotcast: search database open failed: {}", error);
 
@@ -369,7 +379,7 @@ pub fn search_index(state: &SearchIndexState, query: &str) -> Vec<SearchResultIt
         }
     };
 
-    search_database(&connection, query)
+    search_database(&connection, query, offset, limit.min(20))
 }
 
 fn configure_database(connection: &Connection) -> Result<(), String> {
@@ -651,26 +661,54 @@ fn index_entry(
     Ok(())
 }
 
-fn search_database(connection: &Connection, query: &str) -> Vec<SearchResultItem> {
-    let Some(fts_query) = make_fts_query(query) else {
+fn search_database(
+    connection: &Connection,
+    query: &str,
+    offset: usize,
+    limit: usize,
+) -> Vec<SearchResultItem> {
+    let query = query.trim();
+
+    if query.is_empty() {
         return Vec::new();
+    }
+
+    let limit = limit.min(20);
+
+    let query_lower = query.to_lowercase();
+
+    let fts_query = match make_fts_query(query) {
+        Some(query) => query,
+        None => return Vec::new(),
     };
 
     let mut statement = match connection.prepare(
         "
-            SELECT
-                path,
-                title,
-                subtitle,
-                category,
-                bm25(search_entries)
-            FROM search_entries
-            WHERE search_entries MATCH ?1
-            ORDER BY bm25(search_entries)
-            LIMIT 100
-            ",
+        SELECT
+            path,
+            title,
+            subtitle,
+            category
+        FROM search_entries
+        WHERE search_entries MATCH ?1
+        ORDER BY
+            CASE
+                WHEN lower(title) = lower(?2)
+                    THEN 0
+                WHEN lower(title) LIKE lower(?3)
+                    THEN 1
+                WHEN category = 'app'
+                    THEN 2
+                WHEN category = 'project'
+                    THEN 3
+                ELSE 4
+            END,
+            bm25(search_entries)
+        LIMIT ?4 OFFSET ?5
+        ",
     ) {
         Ok(statement) => statement,
+
         Err(error) => {
             eprintln!("Spotcast: search prepare failed: {}", error);
 
@@ -678,20 +716,21 @@ fn search_database(connection: &Connection, query: &str) -> Vec<SearchResultItem
         }
     };
 
-    let rows = match statement.query_map(params![fts_query], |row| {
-        let path: String = row.get(0)?;
+    let prefix = format!("{query_lower}%");
 
-        let title: String = row.get(1)?;
+    let rows = match statement.query_map(
+        params![fts_query, query_lower, prefix, limit as i64, offset as i64,],
+        |row| {
+            let path: String = row.get(0)?;
+            let title: String = row.get(1)?;
+            let subtitle: String = row.get(2)?;
+            let category: String = row.get(3)?;
 
-        let subtitle: String = row.get(2)?;
-
-        let category: String = row.get(3)?;
-
-        let rank: f64 = row.get(4)?;
-
-        Ok((path, title, subtitle, category, rank))
-    }) {
+            Ok((path, title, subtitle, category))
+        },
+    ) {
         Ok(rows) => rows,
+
         Err(error) => {
             eprintln!("Spotcast: search query failed: {}", error);
 
@@ -699,68 +738,33 @@ fn search_database(connection: &Connection, query: &str) -> Vec<SearchResultItem
         }
     };
 
-    let query_lower = query.to_lowercase();
-
-    let mut results: Vec<(i32, f64, SearchResultItem)> = Vec::new();
+    let mut results = Vec::with_capacity(limit);
 
     for row in rows.flatten() {
-        let (path, title, subtitle, category, rank) = row;
+        let (path, title, subtitle, category) = row;
 
-        let title_lower = title.to_lowercase();
-
-        let category_priority = match category.as_str() {
-            "app" => 0,
-            "project" => 1,
-            "file" => 2,
-            _ => 3,
+        let mut result = SearchResultItem {
+            id: format!("{}:{}", category, path),
+            title,
+            subtitle,
+            category,
+            action_payload: path,
         };
 
-        let title_priority = if title_lower == query_lower {
-            0
-        } else if title_lower.starts_with(&query_lower) {
-            1
-        } else {
-            2
-        };
+        if result.category == "project" {
+            let path_string = result.action_payload.clone();
 
-        let score = category_priority * 10 + title_priority;
+            let path = Path::new(&path_string);
 
-        results.push((
-            score,
-            rank,
-            SearchResultItem {
-                id: format!("{}:{}", category, path),
-                title,
-                subtitle,
-                category,
-                action_payload: path,
-            },
-        ));
+            if let Some(app) = detect_best_app(path) {
+                result.subtitle = format!("{} • Open with {}", path.display(), app.name());
+            }
+        }
+
+        results.push(result);
     }
 
-    results.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then_with(|| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .then_with(|| a.2.title.to_lowercase().cmp(&b.2.title.to_lowercase()))
-    });
-
     results
-        .into_iter()
-        .take(50)
-        .map(|(_, _, mut result)| {
-            if result.category == "project" {
-                let path_string = result.action_payload.clone();
-
-                let path = Path::new(&path_string);
-
-                if let Some(app) = detect_best_app(path) {
-                    result.subtitle = format!("{} • Open with {}", path.display(), app.name());
-                }
-            }
-
-            result
-        })
-        .collect()
 }
 
 fn make_fts_query(query: &str) -> Option<String> {
@@ -1025,6 +1029,15 @@ pub fn open_path(path: String) -> Result<(), String> {
             })
         }),
     }
+}
+
+#[tauri::command]
+pub fn hide_launcher(app: AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "Launcher window not found".to_string())?;
+
+    window.hide().map_err(|e| e.to_string())
 }
 
 fn launch_project(app: ProjectApp, path: &Path) -> Result<(), String> {

@@ -24,7 +24,7 @@ pub fn run() {
                     {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
-
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
@@ -39,6 +39,7 @@ pub fn run() {
             commands::launcher::add_bookmark,
             commands::launcher::remove_bookmark,
             commands::launcher::open_bookmarks_file,
+            commands::launcher::hide_launcher,
             commands::global_search,
         ])
         .setup(move |app| {
@@ -71,13 +72,13 @@ pub fn run() {
 
                 tray.set_menu(Some(menu))?;
 
-                let _ = tray.set_show_menu_on_left_click(false);
+                tray.set_show_menu_on_left_click(false)?;
 
                 tray.on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => {
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
-
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
@@ -100,7 +101,7 @@ pub fn run() {
 
                         if let Some(window) = app.get_webview_window("main") {
                             let _ = window.show();
-
+                            let _ = window.unminimize();
                             let _ = window.set_focus();
                         }
                     }
@@ -121,7 +122,6 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let WindowEvent::CloseRequested { api, .. } = event {
                         api.prevent_close();
-
                         let _ = close_window.hide();
                     }
                 });
