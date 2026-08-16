@@ -1,2 +1,2 @@
-[build]
-target-dir = "C:/spotcast-target"
+[env]
+CARGO_TARGET_DIR = { value = "C:/spotcast-target", force = false }
