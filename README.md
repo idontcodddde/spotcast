@@ -251,7 +251,6 @@ Spotcast can remain running in the Windows system tray.
 
 ## Tech Stack
 
-- [SvelteKit](https://kit.svelte.dev/)
 - [Svelte](https://svelte.dev/)
 - [Vite](https://vite.dev/)
 - [Rust](https://www.rust-lang.org/)
