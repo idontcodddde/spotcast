@@ -21,7 +21,9 @@ jobs:
             - name: Run Bun Check
               run: |
                   bun install
-                  bun run check # Ensure this script exists in your package.json
+                  bun run check
 
             - name: Run Cargo Check
-              run: cargo check
+              run: |
+                  cd src-tauri
+                  cargo check
