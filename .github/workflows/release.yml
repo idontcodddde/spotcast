@@ -1,41 +1,39 @@
-name: 'Publish Release'
+name: "Publish Release"
 
 on:
-    push:
-        tags:
-            - 'v*' # should trigger on git tags like v1.0.0, v0.1.2, etc.
+  push:
+    tags:
+      - 'v*'
 
 jobs:
-    publish-tauri:
-        permissions:
-            contents: write
-        strategy:
-            fail-fast: false
-            matrix:
-                platform: [windows-latest] # You can add macos-latest or ubuntu-22.04 here later
+  publish-tauri:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [windows-latest]
 
-        runs-on: ${{ matrix.platform }}
-        steps:
-            - uses: actions/checkout@v4
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
 
-            - name: Setup Node.js
-              uses: actions/setup-node@v4
-              with:
-                  node-version: lts/*
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
 
-            - name: Install Rust stable
-              uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
 
-            - name: Install frontend dependencies
-              run: bun install
+      - name: Install frontend dependencies
+        run: bun install
 
-            - name: Build Tauri App & Publish Release
-              uses: tauri-apps/tauri-action@v0
-              env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              with:
-                  tagName: __TAURI_V2_TAG__ # Automatically handles version tags
-                  releaseName: 'App __TAURI_V2_TAG__'
-                  releaseBody: 'See the assets to download and install this version.'
-                  releaseDraft: false
-                  prerelease: false
+      - name: Build Tauri App & Publish Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: __TAURI_V2_TAG__ 
+          releaseName: 'App __TAURI_V2_TAG__'
+          releaseBody: 'See the assets to download and install this version.'
+          releaseDraft: false
+          prerelease: false
